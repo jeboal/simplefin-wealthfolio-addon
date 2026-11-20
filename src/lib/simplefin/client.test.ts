@@ -66,7 +66,13 @@ describe('fetchAccounts', () => {
     const host = createMockHost();
     host.respond(/\/accounts/, { status: 403, body: 'Forbidden' });
 
-    await expect(fetchAccounts(host.api.network, BASE, {})).rejects.toThrow(/403/);
+    await expect(fetchAccounts(host.api.network, BASE, {})).rejects.toMatchObject({
+      message: expect.stringContaining('403'),
+      diagnosticDetails: {
+        request: { method: 'GET', query: {} },
+        response: { status: 403, body: 'Forbidden' },
+      },
+    });
   });
 
   it('throws a clear error when the body is not JSON', async () => {

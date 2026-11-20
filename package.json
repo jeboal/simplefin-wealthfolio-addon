@@ -1,6 +1,6 @@
 {
   "name": "simplefin-wealthfolio-addon",
-  "version": "1.1.2",
+  "version": "1.1.4-jeb",
   "private": true,
   "packageManager": "pnpm@11.24.0",
   "description": "Sync bank, credit-card and investment data from SimpleFIN Bridge into Wealthfolio.",

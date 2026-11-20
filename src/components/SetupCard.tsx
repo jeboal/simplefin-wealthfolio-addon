@@ -15,6 +15,7 @@ import { useState } from 'react';
 import { AUTH_SECRET_KEY } from '../lib/simplefin/client';
 import { claimSetupToken } from '../lib/simplefin/claim';
 import { splitAccessUrl } from '../lib/simplefin/url';
+import { recordDiagnostic } from '../lib/storage/diagnostics';
 import { DEFAULT_LOOKBACK_DAYS, DEFAULT_PAYMENT_KEYWORDS, DEFAULT_TRANSFER_KEYWORDS, writeConfig } from '../lib/storage/config';
 
 export interface SetupCardProps {
@@ -30,19 +31,36 @@ export function SetupCard({ api, onConnected }: SetupCardProps) {
   async function handleConnect() {
     setError(null);
     setConnecting(true);
+    let operation = 'claim setup token';
+    const sensitiveValues = [token];
+    let accessUrl: string | null = null;
+    let request: unknown = null;
     try {
-      const accessUrl = await claimSetupToken(api.network, token);
+      accessUrl = await claimSetupToken(api.network, token);
       const { baseUrl, basicAuthSecret } = splitAccessUrl(accessUrl);
+      sensitiveValues.push(accessUrl, basicAuthSecret);
+      operation = 'store SimpleFIN credentials';
+      request = { key: AUTH_SECRET_KEY, secret: basicAuthSecret };
       await api.secrets.set(AUTH_SECRET_KEY, basicAuthSecret);
-      await writeConfig(api, {
+      operation = 'save addon configuration';
+      const config = {
         baseUrl,
         mappings: [],
         lookbackDays: DEFAULT_LOOKBACK_DAYS,
         paymentKeywords: DEFAULT_PAYMENT_KEYWORDS,
         transferKeywords: DEFAULT_TRANSFER_KEYWORDS,
-      });
+      };
+      request = config;
+      await writeConfig(api, config);
       onConnected();
     } catch (err) {
+      await recordDiagnostic(api, `Connect: ${operation}`, err, {
+        sensitiveValues,
+        details:
+          operation === 'claim setup token'
+            ? undefined
+            : { request, ...(accessUrl ? { claimResponse: accessUrl } : {}) },
+      });
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setConnecting(false);

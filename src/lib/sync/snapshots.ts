@@ -1,6 +1,7 @@
 import type { HostAPI, SnapshotInput } from '@wealthfolio/addon-sdk';
 import type { SfAccount } from '../simplefin/parse';
 import type { AccountMapping } from '../storage/config';
+import { recordDiagnostic } from '../storage/diagnostics';
 import { isoDate, toIsoDateOnly } from './activities';
 import { subtractDecimal, sumDecimal } from './openingBalance';
 
@@ -46,10 +47,27 @@ export async function syncHoldingsAccount(
   }
 
   const snapshot = toSnapshotInput(sfAccount);
-  const check = await api.snapshots.checkImport(mapping.wfAccountId, [snapshot]);
+  let check;
+  try {
+    check = await api.snapshots.checkImport(mapping.wfAccountId, [snapshot]);
+  } catch (error) {
+    await recordDiagnostic(api, 'snapshots.checkImport rejected the request', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, snapshots: [snapshot] },
+      },
+    });
+    throw error;
+  }
 
   if (check.validationErrors.length > 0) {
-    throw new Error(`snapshot rejected: ${check.validationErrors.join('; ')}`);
+    const error = new Error(`snapshot rejected: ${check.validationErrors.join('; ')}`);
+    await recordDiagnostic(api, 'snapshots.checkImport returned validation errors', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, snapshots: [snapshot] },
+        response: check,
+      },
+    });
+    throw error;
   }
 
   // `checkImport` resolves every symbol against Wealthfolio's own security
@@ -61,6 +79,17 @@ export async function syncHoldingsAccount(
   // a mispriced holding from a real one, so the caller reports it.
   const unresolvedSymbols = check.symbols.filter((s) => !s.found).map((s) => s.symbol);
   if (unresolvedSymbols.length > 0) {
+    await recordDiagnostic(
+      api,
+      'snapshots.checkImport could not resolve one or more symbols',
+      new Error(`Unresolved symbols: ${unresolvedSymbols.join(', ')}`),
+      {
+        details: {
+          request: { accountId: mapping.wfAccountId, snapshots: [snapshot] },
+          response: check,
+        },
+      },
+    );
     api.logger.error(
       `[simplefin] Wealthfolio could not resolve ${unresolvedSymbols.length} symbol(s) for ` +
         `${mapping.sfAccountName}: ${unresolvedSymbols.join(', ')} — these holdings will be ` +
@@ -78,10 +107,27 @@ export async function syncHoldingsAccount(
     return { imported: 0, skipped: 1, unresolvedSymbols };
   }
 
-  const outcome = await api.snapshots.importSnapshots(mapping.wfAccountId, [snapshot]);
+  let outcome;
+  try {
+    outcome = await api.snapshots.importSnapshots(mapping.wfAccountId, [snapshot]);
+  } catch (error) {
+    await recordDiagnostic(api, 'snapshots.importSnapshots rejected the request', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, snapshots: [snapshot] },
+      },
+    });
+    throw error;
+  }
 
   if (outcome.errors.length > 0) {
-    throw new Error(`snapshot import failed: ${outcome.errors.join('; ')}`);
+    const error = new Error(`snapshot import failed: ${outcome.errors.join('; ')}`);
+    await recordDiagnostic(api, 'snapshots.importSnapshots returned errors', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, snapshots: [snapshot] },
+        response: outcome,
+      },
+    });
+    throw error;
   }
 
   return { imported: outcome.snapshotsImported, skipped: 0, unresolvedSymbols };

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
 import { createMockHost } from '../../test/mockHost';
+import { readDiagnostics } from '../storage/diagnostics';
 import type { AccountMapping } from '../storage/config';
 import { emptyWatermark } from '../storage/watermark';
 import { detectCandidate, isPaymentCandidate, syncCashAccount, toActivityImport } from './activities';
@@ -388,8 +389,12 @@ describe('syncCashAccount', () => {
 
   it('logs the rejected payload when checkImport itself throws, so the failing row is visible', async () => {
     const host = createMockHost();
+    const failure = Object.assign(new Error('Unprocessable Entity'), {
+      status: 422,
+      response: { status: 422, body: 'accountId is invalid' },
+    });
     host.api.activities.checkImport = vi.fn(async () => {
-      throw new Error('Unprocessable Entity');
+      throw failure;
     });
 
     await expect(
@@ -398,6 +403,9 @@ describe('syncCashAccount', () => {
 
     expect(host.api.logger.error).toHaveBeenCalledWith(expect.stringContaining(mapping.sfAccountName));
     expect(host.api.logger.error).toHaveBeenCalledWith(expect.stringContaining('"symbol":""'));
+    const entry = readDiagnostics()[0];
+    expect(entry.details).toContain('"amount": "42.10"');
+    expect(entry.details).toContain('accountId is invalid');
   });
 
   it('logs the rejected payload when the host import throws, so the failing row is visible', async () => {

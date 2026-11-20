@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AccountMapTable } from '../components/AccountMapTable';
 import { BridgeErrorBanner } from '../components/BridgeErrorBanner';
+import { DiagnosticLog } from '../components/DiagnosticLog';
 import { HistoryList } from '../components/HistoryList';
 import { SettingsPanel } from '../components/SettingsPanel';
 import { SetupCard } from '../components/SetupCard';
@@ -13,6 +14,7 @@ import { fetchAccounts } from '../lib/simplefin/client';
 import type { SfAccount } from '../lib/simplefin/parse';
 import { bridgeDashboardUrl } from '../lib/simplefin/url';
 import { cardAccountIdsFrom, cashAccountIdsFrom, readConfig, writeConfig, type AccountMapping, type SyncConfig } from '../lib/storage/config';
+import { recordDiagnostic } from '../lib/storage/diagnostics';
 import { readHistory, type SyncRun } from '../lib/storage/history';
 import { runSync } from '../lib/sync/run';
 
@@ -30,11 +32,13 @@ export function SyncPage({ api }: SyncPageProps) {
   const [lastRun, setLastRun] = useState<SyncRun | null>(null);
   const [history, setHistory] = useState<SyncRun[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   async function loadConfig() {
     try {
       setConfig(await readConfig(api));
     } catch (err) {
+      await recordDiagnostic(api, 'Load addon configuration', err);
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -56,7 +60,17 @@ export function SyncPage({ api }: SyncPageProps) {
         setWfAccounts(wfAccountList);
         setHistory(historyList);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .catch(async (err) => {
+        await recordDiagnostic(api, 'Load SimpleFIN and Wealthfolio accounts', err, {
+          details: {
+            request: {
+              simplefin: { method: 'GET', endpoint: '/accounts' },
+              wealthfolio: { operation: 'accounts.getAll' },
+            },
+          },
+        });
+        setError(err instanceof Error ? err.message : String(err));
+      })
       .finally(() => setLoadingAccounts(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.baseUrl]);
@@ -68,10 +82,13 @@ export function SyncPage({ api }: SyncPageProps) {
     try {
       const run = await runSync(api, config);
       setLastRun(run);
-      setHistory(await readHistory(api));
+      try {
+        setHistory(await readHistory(api));
+      } catch (err) {
+        await recordDiagnostic(api, 'Reload sync history after sync (best effort)', err);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      api.logger.error(`[simplefin] sync failed: ${message}`);
       setSyncError(message);
     } finally {
       setSyncing(false);
@@ -86,6 +103,7 @@ export function SyncPage({ api }: SyncPageProps) {
     try {
       await writeConfig(api, next);
     } catch (err) {
+      await recordDiagnostic(api, 'Save account mappings', err, { details: { request: next } });
       setConfig(previous);
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -99,6 +117,7 @@ export function SyncPage({ api }: SyncPageProps) {
     try {
       await writeConfig(api, next);
     } catch (err) {
+      await recordDiagnostic(api, 'Save sync lookback window', err, { details: { request: next } });
       setConfig(previous);
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -112,6 +131,7 @@ export function SyncPage({ api }: SyncPageProps) {
     try {
       await writeConfig(api, next);
     } catch (err) {
+      await recordDiagnostic(api, 'Save payment detection keywords', err, { details: { request: next } });
       setConfig(previous);
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -125,21 +145,46 @@ export function SyncPage({ api }: SyncPageProps) {
     try {
       await writeConfig(api, next);
     } catch (err) {
+      await recordDiagnostic(api, 'Save transfer detection keywords', err, { details: { request: next } });
       setConfig(previous);
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
+  const diagnosticsDisclosure = (
+    <details className="space-y-3">
+      <summary
+        className="cursor-pointer text-sm font-medium"
+        onClick={() => setDiagnosticsOpen(true)}
+      >
+        Local diagnostics
+      </summary>
+      {diagnosticsOpen && (
+        <div className="pt-2">
+          <DiagnosticLog api={api} />
+        </div>
+      )}
+    </details>
+  );
+
   if (!config) {
     return error ? (
-      <Alert variant="destructive" role="alert">
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
+      <>
+        <Alert variant="destructive" role="alert">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+        {diagnosticsDisclosure}
+      </>
     ) : null;
   }
 
   if (!config.baseUrl) {
-    return <SetupCard api={api} onConnected={loadConfig} />;
+    return (
+      <div className="space-y-4">
+        <SetupCard api={api} onConnected={loadConfig} />
+        {diagnosticsDisclosure}
+      </div>
+    );
   }
 
   return (
@@ -163,6 +208,9 @@ export function SyncPage({ api }: SyncPageProps) {
             </TabsTrigger>
             <TabsTrigger value="runs" className="justify-start">
               Runs
+            </TabsTrigger>
+            <TabsTrigger value="diagnostics" className="justify-start">
+              Diagnostics
             </TabsTrigger>
             <TabsTrigger value="staged" className="justify-start">
               Staged
@@ -207,6 +255,9 @@ export function SyncPage({ api }: SyncPageProps) {
           </TabsContent>
           <TabsContent value="runs" className="mt-0">
             <HistoryList runs={history} />
+          </TabsContent>
+          <TabsContent value="diagnostics" className="mt-0">
+            <DiagnosticLog api={api} />
           </TabsContent>
           <TabsContent value="staged" className="mt-0">
             <StagedTransactionsList

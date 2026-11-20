@@ -1,4 +1,5 @@
 import type { AccountType, HostAPI } from '@wealthfolio/addon-sdk';
+import { recordDiagnostic } from './diagnostics';
 import { storageKey } from './keys';
 
 /** How a mapped SimpleFIN account is pushed into Wealthfolio. */
@@ -59,7 +60,9 @@ export async function readConfig(api: HostAPI): Promise<SyncConfig> {
   } catch (error) {
     // Returning empty sends the user back to setup, which is recoverable;
     // throwing here would leave the addon permanently unopenable.
-    api.logger.error(`[simplefin] corrupt config, falling back to empty: ${String(error)}`);
+    await recordDiagnostic(api, 'Read addon configuration found invalid JSON', error, {
+      details: { response: { storedConfig: raw } },
+    });
     return emptyConfig();
   }
 }

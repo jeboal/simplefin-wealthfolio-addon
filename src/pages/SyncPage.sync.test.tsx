@@ -295,20 +295,49 @@ describe('SyncPage sync trigger', () => {
     expect(within(rows[1]).getAllByRole('cell')[1].textContent).toBe('3');
   });
 
-  it('surfaces a thrown runSync as a visible error and re-enables the button', async () => {
+  it('keeps a completed sync successful when history storage fails and logs the error', async () => {
     const host = createMockHost();
     seedConfig(host, []);
     host.respond(/\/accounts/, { body: JSON.stringify({ accounts: [], errors: [] }) });
-    host.api.storage.set = vi.fn(async () => {
-      throw new Error('history storage unavailable');
-    });
+    const storageSet = host.api.storage.set;
+    host.api.storage.set = vi.fn(async (key: string, value: string) => {
+      if (key === 'simplefin.history') throw new Error('history storage unavailable');
+      await storageSet(key, value);
+    }) as never;
 
     render(<SyncPage api={host.api} />);
     const button = await screen.findByRole('button', { name: /sync now/i });
     await userEvent.click(button);
 
-    expect(await screen.findByText(/history storage unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/history storage unavailable/i)).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: /sync now/i })).toBeEnabled();
+    await userEvent.click(screen.getByRole('tab', { name: /diagnostics/i }));
+    expect(await screen.findByText('Save sync run history failed (best effort)')).toBeInTheDocument();
+    expect(await screen.findAllByText(/history storage unavailable/i)).not.toHaveLength(0);
+  });
+
+  it('shows the failed SimpleFIN request and raw host response in local diagnostics', async () => {
+    const host = createMockHost();
+    seedConfig(host, []);
+    host.respond(/\/accounts/, { status: 502, body: 'gateway upstream timeout' });
+
+    render(<SyncPage api={host.api} />);
+    await userEvent.click(await screen.findByRole('button', { name: /sync now/i }));
+    await screen.findAllByText(/HTTP 502/i);
+    await userEvent.click(screen.getByRole('tab', { name: /diagnostics/i }));
+
+    const operation = await screen.findByText('Sync failed during: request account data from SimpleFIN Bridge');
+    const details = operation.parentElement?.querySelectorAll('details');
+    expect(details).toHaveLength(2);
+    const requestResponse = details?.[1] as HTMLElement;
+    await userEvent.click(within(requestResponse).getByText(/request, response, and context/i));
+    expect(within(requestResponse).getByText(/gateway upstream timeout/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /save log to this pc/i }));
+    expect(host.api.files.openSaveDialog).toHaveBeenCalledWith(
+      expect.stringContaining('gateway upstream timeout'),
+      'simplefin-diagnostics.json',
+    );
   });
 
   it('renders staged candidates under the Staged tab', async () => {

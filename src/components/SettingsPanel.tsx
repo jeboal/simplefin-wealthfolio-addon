@@ -23,6 +23,7 @@ import {
 import { useState } from 'react';
 import { AUTH_SECRET_KEY } from '../lib/simplefin/client';
 import { maskBaseUrl } from '../lib/simplefin/url';
+import { recordDiagnostic } from '../lib/storage/diagnostics';
 import { emptyConfig, writeConfig } from '../lib/storage/config';
 
 export interface SettingsPanelProps {
@@ -69,11 +70,16 @@ export function SettingsPanel({
   async function handleDisconnect() {
     setError(null);
     setDisconnecting(true);
+    let operation = 'delete SimpleFIN credentials';
+    let request: unknown = { key: AUTH_SECRET_KEY };
     try {
       await api.secrets.delete(AUTH_SECRET_KEY);
+      operation = 'clear addon configuration';
+      request = emptyConfig();
       await writeConfig(api, emptyConfig());
       onDisconnected();
     } catch (err) {
+      await recordDiagnostic(api, `Disconnect: ${operation}`, err, { details: { request } });
       setError(err instanceof Error ? err.message : String(err));
       setDisconnecting(false);
     }

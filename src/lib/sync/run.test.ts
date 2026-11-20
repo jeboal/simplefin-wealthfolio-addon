@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
 import { createMockHost } from '../../test/mockHost';
 import type { SyncConfig } from '../storage/config';
+import { readDiagnostics } from '../storage/diagnostics';
 import { readStaging, writeStaging } from '../storage/staging';
 import { writeWatermark } from '../storage/watermark';
 import { runSync } from './run';
@@ -182,6 +183,33 @@ describe('runSync', () => {
     const host = okHost();
     await runSync(host.api, config);
     expect(host.storage.has('simplefin.history')).toBe(true);
+  });
+
+  it('logs a failed history write without failing the completed sync', async () => {
+    const host = okHost();
+    const storageSet = host.api.storage.set;
+    host.api.storage.set = vi.fn(async (key: string, value: string) => {
+      if (key === 'simplefin.history') {
+        throw Object.assign(new Error('The operation could not be completed.'), {
+          code: 'internal_error',
+          response: { code: 'internal_error' },
+        });
+      }
+      await storageSet(key, value);
+    }) as never;
+
+    const result = await runSync(host.api, config);
+    expect(result.accounts).toHaveLength(2);
+    expect(result.accounts.every((account) => account.error === null)).toBe(true);
+
+    const [diagnostic] = readDiagnostics();
+    expect(diagnostic.operation).toBe('Save sync run history failed (best effort)');
+    expect(diagnostic.details).toContain('"operation": "api.storage.set"');
+    expect(diagnostic.details).toContain('"key": "simplefin.history"');
+    expect(diagnostic.details).toContain('"serializedBytes"');
+    expect(diagnostic.details).toContain('"code": "internal_error"');
+    expect(diagnostic.details).toContain('"attemptedRun"');
+    expect(host.storage.has('simplefin.history')).toBe(false);
   });
 
   it('throws when there is no configured base URL', async () => {

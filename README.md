@@ -64,6 +64,20 @@ problem: add the host to `allowedHosts` and rebuild.
 claim was already made with that token (including a partially-failed
 attempt), generate a fresh one in the SimpleFIN Bridge dashboard.
 
+**Wealthfolio reports "The operation could not be completed."** Open the
+addon’s **Diagnostics** tab (or **Local diagnostics** under setup) and expand
+**Request, response, and context** for the latest error. The log keeps the
+latest 20 errors and captures the failing operation, stack, request payload,
+and available host response details; network failures also include
+the Bridge response body. Diagnostics stay in memory on this PC for the
+current addon session and are not written to syncable addon storage. Use
+**Save log to this PC** to export them to a local JSON file. Failed requests
+can include account and transaction data; review the file before sharing it.
+Credentials, authorization values, and URL query strings are redacted. Export
+requires the addon's **File Operations** permission; reinstall the updated
+addon and approve that permission if Wealthfolio still reports that
+`files.openSaveDialog` is not allowed.
+
 ---
 
 ## Contributing

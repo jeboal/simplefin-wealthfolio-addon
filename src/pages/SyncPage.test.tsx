@@ -37,6 +37,11 @@ describe('SyncPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /connect/i }));
 
     expect(await screen.findByText(/single-use/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByText(/local diagnostics/i));
+    const operation = await screen.findByText('Connect: claim setup token');
+    const context = operation.parentElement?.querySelectorAll('details')[1] as HTMLElement;
+    await userEvent.click(within(context).getByText(/request, response, and context/i));
+    expect(within(context).getByText(/Forbidden/)).toBeInTheDocument();
   });
 
   it('lists SimpleFIN accounts alongside Wealthfolio accounts once connected', async () => {

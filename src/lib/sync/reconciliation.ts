@@ -1,4 +1,5 @@
 import type { ActivityCreate, ActivityDetails, HostAPI } from '@wealthfolio/addon-sdk';
+import { recordDiagnostic } from '../storage/diagnostics';
 import type { InflowActivityType, StagedCandidate } from '../storage/staging';
 import { isPaymentCandidate, toIsoDateOnly } from './activities';
 import { normalise } from './balance';
@@ -345,6 +346,9 @@ export async function runReconciliation(
       claimedWithdrawalIds.add(matches[0].id);
       resolved += 1;
     } catch (error) {
+      await recordDiagnostic(api, 'Reconciliation failed for staged transaction', error, {
+        details: { request: { transactionId: candidate.sfTransactionId, candidate } },
+      });
       api.logger.error(
         `[simplefin] reconciliation failed for staged candidate ${candidate.sfTransactionId}: ${String(error)}`,
       );
@@ -468,6 +472,14 @@ export async function relinkUnlinkedTransferPairs(
         relinked += 1;
         progressed = true;
       } catch (error) {
+        await recordDiagnostic(api, 'Relink unpaired transfer failed', error, {
+          details: {
+            request: {
+              inflowActivityId: inRow.id,
+              withdrawalActivityId: matches[0].id,
+            },
+          },
+        });
         api.logger.error(`[simplefin] relink failed for TRANSFER_IN ${inRow.id}: ${String(error)}`);
         failed += 1;
       }

@@ -3,6 +3,7 @@ import { fetchAccounts } from '../simplefin/client';
 import type { SfAccount, SfTransaction } from '../simplefin/parse';
 import { cashAccountIdsFrom, type AccountMapping, type SyncConfig } from '../storage/config';
 import { appendRun, type AccountRunResult, type SyncRun } from '../storage/history';
+import { recordDiagnostic } from '../storage/diagnostics';
 import { readStaging, writeStaging, type StagedCandidate } from '../storage/staging';
 import { readWatermark, writeWatermark } from '../storage/watermark';
 import { activityEpoch, syncCashAccount } from './activities';
@@ -96,10 +97,39 @@ async function pushOpeningBalance(
   );
   if (!plug) return 0;
 
-  const [checked] = await api.activities.checkImport([plug]);
-  if (!checked.isValid || checked.duplicateOfId) return 0;
+  let checked;
+  try {
+    [checked] = await api.activities.checkImport([plug]);
+  } catch (error) {
+    await recordDiagnostic(api, 'Opening-balance activities.checkImport rejected the request', error, {
+      details: { request: { accountId: mapping.wfAccountId, rows: [plug] } },
+    });
+    throw error;
+  }
+  if (!checked.isValid) {
+    await recordDiagnostic(
+      api,
+      'Opening-balance activities.checkImport returned an invalid row',
+      new Error('Wealthfolio marked the opening-balance activity invalid'),
+      {
+        details: {
+          request: { accountId: mapping.wfAccountId, rows: [plug] },
+          response: checked,
+        },
+      },
+    );
+    return 0;
+  }
+  if (checked.duplicateOfId) return 0;
 
-  await api.activities.import([checked]);
+  try {
+    await api.activities.import([checked]);
+  } catch (error) {
+    await recordDiagnostic(api, 'Opening-balance activities.import rejected the request', error, {
+      details: { request: { accountId: mapping.wfAccountId, rows: [checked] } },
+    });
+    throw error;
+  }
   return 1;
 }
 
@@ -130,6 +160,20 @@ async function syncOne(
   };
 
   if (!sfAccount) {
+    await recordDiagnostic(
+      api,
+      'SimpleFIN accounts response did not contain a mapped account',
+      new Error(
+        `SimpleFIN account ${mapping.sfAccountId} was not returned by the Bridge. ` +
+          'It may have been disconnected — re-check the mapping.',
+      ),
+      {
+        details: {
+          request: { accountId: mapping.sfAccountId },
+          response: { accountFound: false },
+        },
+      },
+    );
     return {
       accountResult: {
         ...base,
@@ -141,8 +185,10 @@ async function syncOne(
     };
   }
 
+  let operation = 'prepare mapped account';
   try {
     if (mapping.mode === 'HOLDINGS') {
+      operation = 'check and import holdings snapshot';
       const { imported, skipped, unresolvedSymbols } = await syncHoldingsAccount(
         api,
         mapping,
@@ -170,12 +216,14 @@ async function syncOne(
       };
     }
 
+    operation = 'read sync watermark';
     const watermark = await readWatermark(api, mapping.wfAccountId);
     const isFirstSync = watermark.lastPosted === 0;
 
     // A fresh mapping never has enough in the shared, lookbackDays-windowed
     // batch fetch to seed an accurate opening balance — pull this one
     // account's full history separately before pushing anything.
+    operation = isFirstSync ? 'fetch first-sync account history' : 'prepare cash transaction import';
     const syncSfAccount = isFirstSync
       ? ((await fetchFullHistory(api, baseUrl, mapping.sfAccountId)) ?? sfAccount)
       : sfAccount;
@@ -202,8 +250,10 @@ async function syncOne(
       paymentKeywords,
       transferKeywords,
     );
+    operation = 'write sync watermark';
     await writeWatermark(api, mapping.wfAccountId, next);
 
+    operation = 'import opening-balance activity';
     const plugImported = isFirstSync
       ? await pushOpeningBalance(
           api,
@@ -242,18 +292,36 @@ async function syncOne(
   } catch (error) {
     // Per-institution isolation is a hard invariant: record and continue.
     const message = error instanceof Error ? error.message : String(error);
+    await recordDiagnostic(
+      api,
+      `${operation} failed for ${mapping.sfAccountName} (${mapping.sfAccountId})`,
+      error,
+      {
+        details: {
+          wealthfolioAccountId: mapping.wfAccountId,
+          simplefinAccountId: mapping.sfAccountId,
+          mode: mapping.mode,
+        },
+      },
+    );
     api.logger.error(`[simplefin] account ${mapping.sfAccountName} failed: ${message}`);
     return { accountResult: { ...base, error: message }, candidates: [] };
   }
 }
 
-export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun> {
+async function runSyncCore(
+  api: HostAPI,
+  config: SyncConfig,
+  setOperation: (operation: string) => void,
+): Promise<SyncRun> {
+  setOperation('validate SimpleFIN connection');
   if (!config.baseUrl) {
     throw new Error('Not connected to SimpleFIN — claim a setup token first.');
   }
 
   const startedAt = new Date().toISOString();
 
+  setOperation('read mapped-account sync watermarks');
   // One fetch covers every account; the Bridge bills per call, and a single
   // response also lets one institution's error surface alongside healthy data.
   // The window starts at the oldest watermark so no account is short-changed.
@@ -275,10 +343,28 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
 
   const startDate = Math.max(0, Math.min(watermarkFloor, lookbackFloor));
 
+  setOperation('request account data from SimpleFIN Bridge');
   const { accounts, errors } = await fetchAccounts(api.network, config.baseUrl, {
     startDate,
     accountIds: config.mappings.map((m) => m.sfAccountId),
   });
+  for (const bridgeError of errors) {
+    await recordDiagnostic(
+      api,
+      `SimpleFIN Bridge returned an account error (${bridgeError.code})`,
+      new Error(bridgeError.msg),
+      {
+        details: {
+          request: {
+            method: 'GET',
+            endpoint: '/accounts',
+            accountIds: config.mappings.map((mapping) => mapping.sfAccountId),
+          },
+          response: bridgeError,
+        },
+      },
+    );
+  }
 
   const bySfId = new Map(accounts.map((a) => [a.id, a]));
 
@@ -289,6 +375,7 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
   const wfBalances = new Map<string, string>();
   const wfAccountTypes = new Map<string, AccountType>();
   const wfAccountCurrencies = new Map<string, string>();
+  setOperation('read Wealthfolio accounts and pre-sync valuations');
   try {
     for (const account of await api.accounts.getAll()) {
       wfAccountTypes.set(account.id, account.accountType);
@@ -304,6 +391,13 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
       }
     }
   } catch (error) {
+    await recordDiagnostic(api, 'Read Wealthfolio accounts and pre-sync valuations', error, {
+      details: {
+        request: {
+          wealthfolioAccountIds: config.mappings.map((mapping) => mapping.wfAccountId),
+        },
+      },
+    });
     api.logger.error(
       `[simplefin] could not read Wealthfolio balances for the mismatch check: ${String(error)}`,
     );
@@ -314,6 +408,7 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
   const results: AccountRunResult[] = [];
   const detectedCandidates: StagedCandidate[] = [];
   for (const mapping of config.mappings) {
+    setOperation(`sync mapped account ${mapping.sfAccountName} (${mapping.sfAccountId})`);
     const { accountResult, candidates } = await syncOne(
       api,
       config.baseUrl,
@@ -332,13 +427,16 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
   // Best-effort: refresh the host's own cached valuations to reflect what
   // this run just imported, for whatever reads them next. Nothing in this
   // run's own results depends on it, so a failure here is not fatal.
+  setOperation('refresh Wealthfolio valuations after import');
   try {
     await api.portfolio.recalculate();
   } catch (error) {
+    await recordDiagnostic(api, 'Refresh Wealthfolio valuations after import', error);
     api.logger.error(`[simplefin] post-sync portfolio.recalculate failed: ${String(error)}`);
   }
 
   const cashAccountIds = cashAccountIdsFrom(config.mappings, (id) => wfAccountTypes.get(id));
+  setOperation('reconcile staged transactions');
   try {
     const existingStaging = await readStaging(api);
     const { candidates: remainingCandidates } = await runReconciliation(
@@ -349,6 +447,14 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
     );
     await writeStaging(api, remainingCandidates);
   } catch (error) {
+    await recordDiagnostic(api, 'Reconcile staged transactions', error, {
+      details: {
+        request: {
+          cashAccountIds,
+          detectedCandidates,
+        },
+      },
+    });
     // Reconciliation is a secondary pass over transactions that already
     // synced successfully — a failure here must not undo or block the run
     // that already happened.
@@ -362,6 +468,23 @@ export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun
     bridgeErrors: errors,
   };
 
-  await appendRun(api, run);
+  setOperation('save sync run history');
+  try {
+    await appendRun(api, run);
+  } catch (error) {
+    await recordDiagnostic(api, 'Save sync run history failed (best effort)', error);
+  }
   return run;
+}
+
+export async function runSync(api: HostAPI, config: SyncConfig): Promise<SyncRun> {
+  let operation = 'initialize sync';
+  try {
+    return await runSyncCore(api, config, (next) => {
+      operation = next;
+    });
+  } catch (error) {
+    await recordDiagnostic(api, `Sync failed during: ${operation}`, error);
+    throw error;
+  }
 }

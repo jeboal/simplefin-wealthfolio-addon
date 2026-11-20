@@ -1,4 +1,4 @@
-import type { NetworkAPI } from '@wealthfolio/addon-sdk';
+import type { NetworkAPI, NetworkRequest, NetworkResponse } from '@wealthfolio/addon-sdk';
 import { KEY_PREFIX } from '../constants';
 import { parseAccountsResponse, type SfAccount, type SfBridgeError } from './parse';
 
@@ -13,6 +13,18 @@ export interface FetchAccountsOptions {
   pending?: boolean;
   accountIds?: string[];
   balancesOnly?: boolean;
+}
+
+function requestFailure(
+  message: string,
+  request: Record<string, unknown>,
+  response: { status: number; headers: Record<string, string>; body: string } | null,
+  cause?: unknown,
+): Error {
+  const error = new Error(message);
+  if (cause !== undefined) Object.assign(error, { cause });
+  Object.assign(error, { diagnosticDetails: { request, response } });
+  return error;
 }
 
 export async function fetchAccounts(
@@ -38,26 +50,55 @@ export async function fetchAccounts(
     url.searchParams.append('account', id);
   }
 
-  const response = await net.request({
+  const request: NetworkRequest = {
     url: url.toString(),
     method: 'GET',
     auth: { type: 'basic', secretKey: AUTH_SECRET_KEY },
-  });
+  };
+  const requestDetails = {
+    method: request.method,
+    url: `${url.origin}${url.pathname}`,
+    query: Object.fromEntries(url.searchParams.entries()),
+    auth: request.auth,
+  };
+
+  let response: NetworkResponse;
+  try {
+    response = await net.request(request);
+  } catch (error) {
+    throw requestFailure('SimpleFIN network.request(GET /accounts) rejected', requestDetails, null, error);
+  }
 
   if (response.status !== 200) {
-    throw new Error(`SimpleFIN Bridge returned HTTP ${response.status}`);
+    throw requestFailure(
+      `SimpleFIN Bridge returned HTTP ${response.status}`,
+      requestDetails,
+      response,
+    );
   }
 
   let payload: unknown;
   try {
     payload = JSON.parse(response.body);
-  } catch {
-    // Bridges behind a proxy return HTML on outage; surface that plainly
-    // rather than letting a SyntaxError bubble up unattributed.
-    throw new Error('SimpleFIN Bridge returned a body that is not valid JSON');
+  } catch (error) {
+    throw requestFailure(
+      'SimpleFIN Bridge returned a body that is not valid JSON',
+      requestDetails,
+      response,
+      error,
+    );
   }
 
-  // Bridge errors are returned, not thrown: a failing institution must not
-  // prevent the healthy accounts in the same response from syncing.
-  return parseAccountsResponse(payload);
+  try {
+    // Bridge errors are returned, not thrown: a failing institution must not
+    // prevent the healthy accounts in the same response from syncing.
+    return parseAccountsResponse(payload);
+  } catch (error) {
+    throw requestFailure(
+      'SimpleFIN accounts response could not be parsed',
+      requestDetails,
+      response,
+      error,
+    );
+  }
 }

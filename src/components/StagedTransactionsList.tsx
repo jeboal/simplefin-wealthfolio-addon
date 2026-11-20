@@ -16,6 +16,7 @@ import {
 } from '@wealthfolio/ui';
 import { Fragment, useEffect, useState } from 'react';
 import { describeWithdrawals, findBackfillCandidates, relinkUnlinkedTransferPairs, resolveAmbiguous, runReconciliation } from '../lib/sync/reconciliation';
+import { recordDiagnostic } from '../lib/storage/diagnostics';
 import { readStaging, writeStaging, type StagedCandidate } from '../lib/storage/staging';
 import { compactCellClassName, compactHeadClassName } from './tableStyle';
 
@@ -81,6 +82,7 @@ export function StagedTransactionsList({
     try {
       setCandidates(await readStaging(api));
     } catch (err) {
+      await recordDiagnostic(api, 'Load staged transaction candidates', err);
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -96,6 +98,9 @@ export function StagedTransactionsList({
     try {
       await writeStaging(api, next);
     } catch (err) {
+      await recordDiagnostic(api, 'Dismiss staged transaction', err, {
+        details: { request: { transactionId: target.sfTransactionId } },
+      });
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -107,6 +112,15 @@ export function StagedTransactionsList({
     try {
       setChoices(await describeWithdrawals(api, cashAccountIds, candidate.candidateWithdrawalIds));
     } catch (err) {
+      await recordDiagnostic(api, 'Load matching Wealthfolio withdrawals', err, {
+        details: {
+          request: {
+            cashAccountIds,
+            candidateWithdrawalIds: candidate.candidateWithdrawalIds,
+            transactionId: candidate.sfTransactionId,
+          },
+        },
+      });
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -120,6 +134,15 @@ export function StagedTransactionsList({
       await writeStaging(api, next);
       setResolving(null);
     } catch (err) {
+      await recordDiagnostic(api, 'Resolve staged transaction', err, {
+        details: {
+          request: {
+            cashAccountIds,
+            transactionId: resolving.sfTransactionId,
+            chosenWithdrawalId: chosenId,
+          },
+        },
+      });
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -145,6 +168,16 @@ export function StagedTransactionsList({
         `Found ${found.length} new candidate${found.length === 1 ? '' : 's'}. Relinked ${relinked} transfer pair${relinked === 1 ? '' : 's'}: ${unmatched} had no match, ${ambiguous} had multiple candidates, ${failed} failed.`,
       );
     } catch (err) {
+      await recordDiagnostic(api, 'Scan older transactions for payments and transfers', err, {
+        details: {
+          request: {
+            cardAccountIds,
+            cashAccountIds,
+            paymentKeywords,
+            transferKeywords,
+          },
+        },
+      });
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setScanning(false);

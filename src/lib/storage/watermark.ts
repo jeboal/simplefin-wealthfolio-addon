@@ -1,4 +1,5 @@
 import type { HostAPI } from '@wealthfolio/addon-sdk';
+import { recordDiagnostic } from './diagnostics';
 import { storageKey } from './keys';
 
 /**
@@ -77,9 +78,9 @@ export async function readWatermark(api: HostAPI, wfAccountId: string): Promise<
     // A corrupt watermark must not wedge the account. Reset to "never synced"
     // and say so — a re-push is idempotent-ish via checkImport's duplicate
     // detection, whereas a hard failure would block the account forever.
-    api.logger.error(
-      `[simplefin] corrupt watermark for ${wfAccountId}, resetting: ${String(error)}`,
-    );
+    await recordDiagnostic(api, `Read sync watermark found invalid JSON for ${wfAccountId}`, error, {
+      details: { response: { accountId: wfAccountId, storedWatermark: raw } },
+    });
     return emptyWatermark();
   }
 }

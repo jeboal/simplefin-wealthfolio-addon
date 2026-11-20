@@ -1,4 +1,5 @@
 import type { HostAPI } from '@wealthfolio/addon-sdk';
+import { recordDiagnostic } from './diagnostics';
 import { storageKey } from './keys';
 
 export type CandidateStatus = 'pending' | 'ambiguous';
@@ -47,7 +48,9 @@ export async function readStaging(api: HostAPI): Promise<StagedCandidate[]> {
   try {
     return JSON.parse(raw) as StagedCandidate[];
   } catch (error) {
-    api.logger.error(`[simplefin] corrupt staging store, starting fresh: ${String(error)}`);
+    await recordDiagnostic(api, 'Read staged transactions found invalid JSON', error, {
+      details: { response: { storedStaging: raw } },
+    });
     return [];
   }
 }

@@ -3,6 +3,7 @@ import type { SfAccount, SfTransaction } from '../simplefin/parse';
 import type { AccountMapping } from '../storage/config';
 import type { InflowActivityType, StagedCandidate } from '../storage/staging';
 import { advanceWatermark, shouldPush, type Watermark } from '../storage/watermark';
+import { recordDiagnostic } from '../storage/diagnostics';
 
 /** Epoch seconds -> YYYY-MM-DD in UTC. Addon-internal only — never sent to the host. */
 export function isoDate(epochSeconds: number): string {
@@ -173,6 +174,11 @@ export async function syncCashAccount(
   try {
     checked = await api.activities.checkImport(rows);
   } catch (error) {
+    await recordDiagnostic(api, 'activities.checkImport rejected the request', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, rows },
+      },
+    });
     // A rejection here means the host rejected the request itself (e.g. a
     // required field the addon-sdk types don't yet reflect) rather than
     // flagging individual rows — log the payload so the mismatch is visible.
@@ -187,25 +193,42 @@ export async function syncCashAccount(
   // guard behind our own watermark; we never force-import over them.
   const importable: ActivityImport[] = [];
   const importableTxns: SfTransaction[] = [];
+  const rejectedRows: Array<{ request: ActivityImport; response: ActivityImport }> = [];
   let duplicates = 0;
   let skipped = 0;
 
-  checked.forEach((row, index) => {
+  for (const [index, row] of checked.entries()) {
     if (row.duplicateOfId || row.duplicateOfLineNumber !== undefined) {
       duplicates += 1;
-      return;
+      continue;
     }
     if (!row.isValid) {
       skipped += 1;
+      rejectedRows.push({ request: rows[index], response: row });
       api.logger.error(
         `[simplefin] row rejected by checkImport for ${mapping.sfAccountName}: ` +
           JSON.stringify(row.errors ?? {}),
       );
-      return;
+      continue;
     }
     importable.push(row);
     importableTxns.push(candidates[index]);
-  });
+  }
+
+  if (rejectedRows.length > 0) {
+    await recordDiagnostic(
+      api,
+      'activities.checkImport rejected one or more rows',
+      new Error(`${rejectedRows.length} activity row(s) were marked invalid by Wealthfolio`),
+      {
+        details: {
+          accountId: mapping.wfAccountId,
+          accountName: mapping.sfAccountName,
+          rejectedRows,
+        },
+      },
+    );
+  }
 
   if (importable.length === 0) {
     // Rows duplicating an activity Wealthfolio already holds (`duplicateOfId`)
@@ -229,6 +252,11 @@ export async function syncCashAccount(
   try {
     outcome = await api.activities.import(importable);
   } catch (error) {
+    await recordDiagnostic(api, 'activities.import rejected the request', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, rows: importable },
+      },
+    });
     // `checkImport` marked these rows valid, so a rejection here means the
     // host's import-time validation caught something checkImport didn't —
     // log the exact payload so the failing field is visible next run instead
@@ -265,12 +293,19 @@ export async function syncCashAccount(
   // check is the net for a partial acceptance the host may never produce.
   const landed = outcome.summary.imported + outcome.summary.duplicates;
   if (!outcome.summary.success || landed < importable.length) {
-    throw new Error(
+    const error = new Error(
       `activities.import landed ${landed} of ${importable.length} row(s) for ` +
         `${mapping.sfAccountName} (success=${outcome.summary.success}, ` +
         `imported=${outcome.summary.imported}, duplicates=${outcome.summary.duplicates}, ` +
         `skipped=${outcome.summary.skipped}) — watermark held back for a retry next run`,
     );
+    await recordDiagnostic(api, 'activities.import returned an incomplete result', error, {
+      details: {
+        request: { accountId: mapping.wfAccountId, rows: importable },
+        response: outcome,
+      },
+    });
+    throw error;
   }
 
   // Only an inflow (money landing on the account) is ever scanned for

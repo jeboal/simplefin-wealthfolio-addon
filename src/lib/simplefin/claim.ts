@@ -1,4 +1,4 @@
-import type { NetworkAPI } from '@wealthfolio/addon-sdk';
+import type { NetworkAPI, NetworkRequest, NetworkResponse } from '@wealthfolio/addon-sdk';
 
 /**
  * Exchange a one-time SimpleFIN setup token for a permanent access URL.
@@ -18,16 +18,34 @@ export async function claimSetupToken(net: NetworkAPI, setupToken: string): Prom
     throw new Error('That does not look like a SimpleFIN setup token (no https claim URL)');
   }
 
-  const response = await net.request({ url: claimUrl, method: 'POST', body: '' });
+  const request: NetworkRequest = { url: claimUrl, method: 'POST', body: '' };
+  const requestDetails = {
+    method: request.method,
+    url: claimUrl,
+    body: request.body,
+  };
+  let response: NetworkResponse;
+  try {
+    response = await net.request(request);
+  } catch (error) {
+    const failure = new Error('SimpleFIN setup-token claim network.request rejected');
+    Object.assign(failure, { cause: error });
+    Object.assign(failure, { diagnosticDetails: { request: requestDetails, response: null } });
+    throw failure;
+  }
 
   if (response.status === 403) {
-    throw new Error(
+    const failure = new Error(
       'The Bridge refused this setup token (HTTP 403). Setup tokens are single-use — ' +
         'generate a fresh one in the SimpleFIN Bridge dashboard.',
     );
+    Object.assign(failure, { diagnosticDetails: { request: requestDetails, response } });
+    throw failure;
   }
   if (response.status !== 200) {
-    throw new Error(`Claiming the setup token failed: HTTP ${response.status}`);
+    const failure = new Error(`Claiming the setup token failed: HTTP ${response.status}`);
+    Object.assign(failure, { diagnosticDetails: { request: requestDetails, response } });
+    throw failure;
   }
 
   return response.body.trim();

@@ -1,7 +1,7 @@
 {
   "id": "simplefin-wealthfolio-addon",
   "name": "SimpleFIN Sync",
-  "version": "1.1.2",
+  "version": "1.1.4-jeb",
   "description": "Sync bank, credit-card and investment data from SimpleFIN Bridge into Wealthfolio.",
   "author": "Christian Mendieta",
   "homepage": "https://github.com/christancho/simplefin-wealthfolio-addon",
@@ -78,6 +78,13 @@
         { "name": "importSnapshots", "isDeclared": true, "isDetected": false }
       ],
       "purpose": "Import holdings snapshots for investment accounts."
+    },
+    {
+      "category": "files",
+      "functions": [
+        { "name": "openSaveDialog", "isDeclared": true, "isDetected": false }
+      ],
+      "purpose": "Let the user explicitly save the local diagnostic log to a file on this device."
     },
     {
       "category": "portfolio",

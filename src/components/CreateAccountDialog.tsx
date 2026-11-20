@@ -14,6 +14,7 @@ import {
 } from '@wealthfolio/ui';
 import { useState } from 'react';
 import { KEY_PREFIX } from '../lib/constants';
+import { recordDiagnostic } from '../lib/storage/diagnostics';
 import type { SfAccount } from '../lib/simplefin/parse';
 import { nativeSelectClassName } from './nativeSelectStyle';
 
@@ -59,22 +60,26 @@ export function CreateAccountDialog({
   async function handleCreate() {
     setError(null);
     setCreating(true);
+    const request = {
+      name: draft.name,
+      currency: draft.currency,
+      accountType: draft.accountType,
+      trackingMode: draft.trackingMode,
+      provider: KEY_PREFIX,
+      providerAccountId: sfAccount.id,
+      // The backend's create endpoint requires these even though they're
+      // normally server-computed; the addon-sdk's Account type doesn't
+      // surface that its `create()` payload diverges from its response shape.
+      isDefault: false,
+      isActive: true,
+    };
     try {
-      const account = await api.accounts.create({
-        name: draft.name,
-        currency: draft.currency,
-        accountType: draft.accountType,
-        trackingMode: draft.trackingMode,
-        provider: KEY_PREFIX,
-        providerAccountId: sfAccount.id,
-        // The backend's create endpoint requires these even though they're
-        // normally server-computed; the addon-sdk's Account type doesn't
-        // surface that its `create()` payload diverges from its response shape.
-        isDefault: false,
-        isActive: true,
-      });
+      const account = await api.accounts.create(request);
       onCreated(account);
     } catch (err) {
+      await recordDiagnostic(api, 'accounts.create rejected the request', err, {
+        details: { request },
+      });
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setCreating(false);
